@@ -132,7 +132,7 @@ void adiv5_dp_init(ADIv5_DP_t *dp)
 		memcpy(ap, &tmpap, sizeof(*ap));
 		adiv5_dp_ref(dp);
 
-		ap->cfg = adiv5_ap_read(ap, ADIV5_AP_CFG);
+		ap->cfg = adiv5_ap_read(ap, ADIV5_AP_CFG); /* XXX I don't think this register exists */
 		ap->base = adiv5_ap_read(ap, ADIV5_AP_BASE);
 
 		/* Should probe further here to make sure it's a valid target.
@@ -148,13 +148,14 @@ void adiv5_dp_init(ADIv5_DP_t *dp)
 		t->driver = adiv5_driver_str;
 		t->check_error = ap_check_error;
 
+		/* check for mem-ap? */
 		t->mem_read_words = ap_mem_read_words;
 		t->mem_write_words = ap_mem_write_words;
 		t->mem_read_bytes = ap_mem_read_bytes;
 		t->mem_write_bytes = ap_mem_write_bytes;
 
-		/* The rest sould only be added after checking ROM table */
-		cortexm_probe(t);
+		/* The rest should only be added after checking ROM table */
+		cortexm_probe(t); /* XXX only for cortex-m ports? */
 	}
 	adiv5_dp_unref(dp);
 }
@@ -264,7 +265,7 @@ ap_mem_write_bytes(struct target_s *target, uint32_t dest, const uint8_t *src, i
 
 uint32_t adiv5_ap_mem_read(ADIv5_AP_t *ap, uint32_t addr)
 {
-	adiv5_ap_write(ap, ADIV5_AP_CSW, 0xA2000052);
+	adiv5_ap_write(ap, ADIV5_AP_CSW, 0xA2000052); /* XXX why 0xa....? */
 	adiv5_ap_write(ap, ADIV5_AP_TAR, addr);
 	return adiv5_ap_read(ap, ADIV5_AP_DRW);
 }
