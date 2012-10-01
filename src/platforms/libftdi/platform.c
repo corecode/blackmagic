@@ -57,6 +57,11 @@ int platform_init(void)
 		abort();
 	}
 
+	if((err = ftdi_usb_reset(ftdic)) != 0) {
+		fprintf(stderr, "ftdi_usb_reset: %d: %s\n", 
+			err, ftdi_get_error_string(ftdic));
+		abort();
+	}
 	if((err = ftdi_set_latency_timer(ftdic, 1)) != 0) {
 		fprintf(stderr, "ftdi_set_latency_timer: %d: %s\n", 
 			err, ftdi_get_error_string(ftdic));
