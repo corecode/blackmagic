@@ -109,7 +109,13 @@ int platform_buffer_read(uint8_t *data, int size)
 {
 	int index = 0;
 	platform_buffer_flush();
-	while((index += ftdi_read_data(ftdic, data + index, size-index)) != size);
+	while (index < size) {
+		int res = ftdi_read_data(ftdic, data + index, size-index);
+		assert(res >= 0);
+		index += res;
+		if (res == 0)
+			usleep(1000); /* XXX hack */
+	}
 	return size;
 }
 
