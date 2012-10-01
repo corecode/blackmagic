@@ -59,16 +59,26 @@ int adiv5_swdp_scan(void)
 	swdptap_seq_out(0xA5, 8);
 	ack = swdptap_seq_in(3);
 	if((ack != SWDP_ACK_OK) || swdptap_seq_in_parity(&dp->idcode, 32)) {
-		DEBUG("\n");
+		DEBUG("invalid id/parity: ack %d, id %08x\n", ack, dp->idcode);
 		morse("NO TARGETS.", 1);
 		free(dp);
 		return -1;
 	}
+	DEBUG("SWD init success, id %08x\n", dp->idcode);
 
 	dp->dp_write = adiv5_swdp_write;
 	dp->dp_read = adiv5_swdp_read;
 	dp->error = adiv5_swdp_error;
 	dp->low_access = adiv5_swdp_low_access;
+
+	/* Clear errors */
+	adiv5_swdp_write(dp, ADIV5_DP_ABORT,
+			 ADIV5_DP_ABORT_ORUNERRCLR |
+			 ADIV5_DP_ABORT_STKCMPCLR |
+			 ADIV5_DP_ABORT_STKERRCLR |
+			 ADIV5_DP_ABORT_WDERRCLR);
+	adiv5_swdp_write(dp, ADIV5_DP_SELECT, 0); /* select CTRLSTAT */
+	adiv5_swdp_write(dp, ADIV5_DP_CTRLSTAT, 0); /* clrear ORUNDETECT */
 
 	adiv5_dp_init(dp);
 
@@ -94,7 +104,7 @@ static uint32_t adiv5_swdp_error(ADIv5_DP_t *dp)
 
 	err = adiv5_swdp_read(dp, ADIV5_DP_CTRLSTAT) & 
 		(ADIV5_DP_CTRLSTAT_STICKYORUN | ADIV5_DP_CTRLSTAT_STICKYCMP |
-		ADIV5_DP_CTRLSTAT_STICKYERR);
+		 ADIV5_DP_CTRLSTAT_STICKYERR | ADIV5_DP_CTRLSTAT_WDATAERR);
 
 	if(err & ADIV5_DP_CTRLSTAT_STICKYORUN) 
 		clr |= ADIV5_DP_ABORT_ORUNERRCLR;
@@ -102,6 +112,8 @@ static uint32_t adiv5_swdp_error(ADIv5_DP_t *dp)
 		clr |= ADIV5_DP_ABORT_STKCMPCLR;
 	if(err & ADIV5_DP_CTRLSTAT_STICKYERR) 
 		clr |= ADIV5_DP_ABORT_STKERRCLR;
+	if(err & ADIV5_DP_CTRLSTAT_WDATAERR)
+		clr |= ADIV5_DP_ABORT_WDERRCLR;
 
 	adiv5_swdp_write(dp, ADIV5_DP_ABORT, clr);
 	dp->fault = 0;
@@ -115,6 +127,7 @@ static uint32_t adiv5_swdp_low_access(ADIv5_DP_t *dp, uint8_t APnDP, uint8_t RnW
 	uint8_t request = 0x81;
 	uint32_t response;
 	uint8_t ack;
+	int retry = 3;
 
 	if(APnDP && dp->fault) return 0;
 
@@ -126,17 +139,50 @@ static uint32_t adiv5_swdp_low_access(ADIv5_DP_t *dp, uint8_t APnDP, uint8_t RnW
 	if((addr == 4) || (addr == 8))
 		request ^= 0x20;
 
-	do {
+retry:
+	for (;;) {
 		swdptap_seq_out(request, 8);
 		ack = swdptap_seq_in(3);
-	} while(ack == SWDP_ACK_WAIT);
+
+		const char * const nbl[] =
+			{ "0000", "0001", "0010", "0011", "0100", "0101", "0110", "0111",
+			  "1000", "1001", "1010", "1011", "1100", "1101", "1110", "1111" };
+		DEBUG("req %s%s %s %s %d ack %d",
+		      nbl[request >> 4], nbl[request & 0xf],
+		      APnDP ? "AP" : "DP", RnW ? "R" : "W", addr >> 2, ack);
+		if (ack != SWDP_ACK_WAIT)
+			break;
+		DEBUG(" - got WAIT, flushing output\n");
+		swdptap_seq_out(0, 8); /* flush */
+	}
 
 	if(ack == SWDP_ACK_FAULT) {
+		DEBUG(" - FAULT\n");
 		dp->fault = 1;
 		return 0;
 	}
 
 	if(ack != SWDP_ACK_OK) {
+		if (retry > 0) {
+			/* try to recover */
+			DEBUG(" - damaged ACK, trying to recover framing\n");
+			retry--;
+			swdptap_reset();
+			swdptap_seq_out(0xa5, 8);
+			ack = swdptap_seq_in(3);
+			if (ack == SWDP_ACK_OK && swdptap_seq_in_parity(&response, 32) == 0) {
+				swdptap_seq_out(0, 8);
+				platform_buffer_flush();
+				DEBUG("recovery successful\n");
+				/* int err = adiv5_swdp_error(dp); */
+				/* DEBUG("recovery successful, error flags %08x\n", err); */
+				/* if (err) { */
+				/* 	dp->fault = 1; */
+				/* 	return 0; */
+				/* } */
+				goto retry;
+			}
+		}
 		/* Fatal error if invalid ACK response */
 		PLATFORM_FATAL_ERROR(1);
 	}
@@ -144,12 +190,16 @@ static uint32_t adiv5_swdp_low_access(ADIv5_DP_t *dp, uint8_t APnDP, uint8_t RnW
 	if(RnW) {
 		if(swdptap_seq_in_parity(&response, 32))  /* Give up on parity error */
 			PLATFORM_FATAL_ERROR(1);
+		DEBUG(" in:  %08x\n", response);
 	} else {
+		DEBUG(" out: %08x\n", value);
 		swdptap_seq_out_parity(value, 32);
 	}
 
 	/* REMOVE THIS */
 	swdptap_seq_out(0, 8);
+	platform_buffer_flush();
+	/* DEBUG("\n"); */
 
 	return response;
 }
