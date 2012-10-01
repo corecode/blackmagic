@@ -92,6 +92,9 @@ int platform_init(void)
 
 void platform_buffer_flush(void)
 {
+	if (bufptr == 0)
+		return;
+
 	assert(ftdi_write_data(ftdic, outbuf, bufptr) == bufptr);
 //	printf("FT2232 platform_buffer flush: %d bytes\n", bufptr);
 	bufptr = 0;
