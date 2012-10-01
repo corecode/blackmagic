@@ -55,13 +55,14 @@ int jtagtap_init(void)
 
 	assert(ftdic != NULL);
 
-	if((err = ftdi_set_bitmode(ftdic, 0xAB, BITMODE_MPSSE)) != 0) {
+	if((err = ftdi_set_bitmode(ftdic, 0, BITMODE_RESET)) ||
+	   (err = ftdi_set_bitmode(ftdic, 0, BITMODE_MPSSE))) {
 		fprintf(stderr, "ftdi_set_bitmode: %d: %s\n", 
 			err, ftdi_get_error_string(ftdic));
 		abort();
 	}
 
-	assert(ftdi_write_data(ftdic, "\x86\x00\x00\x80\xA8\xAB", 6) == 6);
+	assert(ftdi_write_data(ftdic, "\x8B\x86\x06\x00\x80\xA8\xAB\x85", 8) == 8);
 
 	/* Go to JTAG mode for SWJ-DP */
 	for(int i = 0; i <= 50; i++) jtagtap_next(1, 0); /* Reset SW-DP */
