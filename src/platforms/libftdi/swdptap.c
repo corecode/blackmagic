@@ -29,31 +29,24 @@
 #include "platform.h"
 #include "swdptap.h"
 
+static void swdptap_init_internal(void);
 static void swdptap_turnaround(uint8_t dir);
-static uint8_t swdptap_bit_in(void);
-static void swdptap_bit_out(uint8_t val);
 
 int swdptap_init(void)
 {
-	int err;
-
 	assert(ftdic != NULL);
 
-	if((err = ftdi_set_bitmode(ftdic, 0xAB, BITMODE_BITBANG)) != 0) {
-		fprintf(stderr, "ftdi_set_bitmode: %d: %s\n", 
-			err, ftdi_get_error_string(ftdic));
-		abort();
-	}
-
-	assert(ftdi_write_data(ftdic, "\xAB\xA8", 2) == 2);
+	swdptap_init_internal();
 
 	/* This must be investigated in more detail.
 	 * As described in STM32 Reference Manual... */
-	swdptap_seq_out(0xFFFF, 16); 
+	/* swdptap_seq_out(0xFFFF, 16);  */
 	swdptap_reset();
 	swdptap_seq_out(0xE79E, 16); /* 0b0111100111100111 */ 
+	/* swdptap_seq_out(0xffffffff, 32); */
+	/* swdptap_seq_out(0xfffff, 24); */
 	swdptap_reset();
-	swdptap_seq_out(0, 16); 
+	platform_buffer_flush();
 
 	return 0;
 }
@@ -62,7 +55,199 @@ void swdptap_reset(void)
 {
         swdptap_turnaround(0);
         /* 50 clocks with TMS high */
-        for(int i = 0; i < 50; i++) swdptap_bit_out(1);
+	swdptap_seq_out(0xffffffff, 32);
+	swdptap_seq_out(0x000fffff, 24);
+}
+
+#ifdef PROBE_MPSSE
+/**
+ * This code is for use with a KT-Link adapter, or a Bus Blaster with
+ * KT-Link buffer.
+ */
+
+static void swdptap_seq_out_internal(uint32_t MS, int ticks);
+
+const uint16_t swdptap_swdoe = 0x1000;
+static uint16_t swdptap_outputs = 0xac02;
+static uint16_t swdptap_direction = 0xff2b;
+
+static void swdptap_set_bits(void)
+{
+	uint8_t cmd[] = {
+		SET_BITS_LOW, swdptap_outputs & 0xff, swdptap_direction & 0xff,
+		SET_BITS_HIGH, (swdptap_outputs >> 8) & 0xff, (swdptap_direction >> 8) & 0xff
+	};
+	platform_buffer_write(cmd, sizeof(cmd));
+}
+
+static void swdptap_init_internal(void)
+{
+	int err;
+
+	if((err = ftdi_set_bitmode(ftdic, 0, BITMODE_RESET)) ||
+	   (err = ftdi_set_bitmode(ftdic, 0, BITMODE_MPSSE))) {
+		fprintf(stderr, "ftdi_set_bitmode: %d: %s\n", 
+			err, ftdi_get_error_string(ftdic));
+		abort();
+	}
+
+	uint8_t setup[] = {
+		DIS_DIV_5,
+		TCK_DIVISOR, 0, 1,
+		LOOPBACK_END
+	};
+	platform_buffer_write(setup, sizeof(setup));
+	swdptap_set_bits();
+	platform_buffer_flush();
+}
+
+static void swdptap_turnaround(uint8_t in)
+{
+	const int trn = 1;
+
+	static uint8_t olddir = 0;
+
+	if (in == olddir)
+		return;
+	olddir = in;
+
+	/* DEBUG("turning %s\n", in ? "in" : "out"); */
+
+	/* swdoe is active low */
+	if (in)
+		swdptap_outputs |= swdptap_swdoe;
+	else
+		swdptap_outputs &= ~swdptap_swdoe;
+
+	if (in)
+		swdptap_set_bits();
+
+	swdptap_seq_out_internal(0, trn);	/* we're masked.  only for clk. */
+
+	if (!in)
+		swdptap_set_bits();
+}
+
+uint32_t swdptap_seq_in(int ticks)
+{
+	uint8_t buf[] = {
+		MPSSE_DO_READ | MPSSE_LSB,
+		0,		/* len - 1 low */
+		0		/* len - 1 high (always 0) */
+	};
+
+	assert(ticks <= 32);
+
+	/* DEBUG("seq_in %d\n", ticks); */
+
+	swdptap_turnaround(1);
+
+	if (ticks >= 8) {
+		buf[1] = ticks / 8 - 1;
+		platform_buffer_write(buf, sizeof(buf));
+	}
+
+	if (ticks % 8) {
+		buf[0] |= MPSSE_BITMODE;
+		buf[1] = ticks % 8 - 1;
+		platform_buffer_write(buf, 2);
+	}
+
+	uint8_t res[4] = {0};	/* max 32 bits */
+	platform_buffer_read(res, (ticks + 7) / 8);
+
+	uint32_t ret = 0;
+	for (int msb = ticks / 8 - 1; msb >= 0; --msb)
+		ret = (ret << 8) | res[msb];
+
+	int bits_remaining = ticks % 8;
+	ret |= (res[ticks / 8] >> /* remaining byte */
+		(8 - bits_remaining)) /* bits come in from MSB */
+		<< (ticks - bits_remaining); /* move them to the top */
+
+	/* DEBUG("  read: %08x\n", ret); */
+
+	return (ret);
+}
+
+static int swdptap_parity(uint32_t data)
+{
+	data ^= data >> 16;
+	data ^= data >> 8;
+	data ^= data >> 4;
+	data ^= data >> 2;
+	data ^= data >> 1;
+	return (data & 1);
+}
+
+uint8_t swdptap_seq_in_parity(uint32_t *ret, int ticks)
+{
+	uint32_t result = swdptap_seq_in(ticks);
+	int in_parity = swdptap_seq_in(1);
+
+	*ret = result;
+	return (in_parity ^ swdptap_parity(result));
+}
+
+static void swdptap_seq_out_internal(uint32_t MS, int ticks)
+{
+	uint8_t buf[] = {
+		MPSSE_DO_WRITE | MPSSE_WRITE_NEG | MPSSE_LSB,
+		0,		/* len - 1 low */
+		0,		/* len - 1 high (always 0) */
+		MS & 0xff,
+		(MS >> 8) & 0xff,
+		(MS >> 16) & 0xff,
+		(MS >> 24) & 0xff,
+	};
+
+	assert(ticks <= 32);
+
+	/* DEBUG("seq_out %d, %08x\n", ticks, MS); */
+
+	if (ticks >= 8) {
+		buf[1] = ticks / 8 - 1;
+		platform_buffer_write(buf, ticks / 8 + 3);
+	}
+
+	if (ticks % 8) {
+		buf[0] |= MPSSE_BITMODE;
+		buf[1] = ticks % 8 - 1;
+		buf[2] = (MS >> (ticks / 8 * 8)) & 0xff;
+		platform_buffer_write(buf, 3);
+	}
+}
+
+void swdptap_seq_out(uint32_t MS, int ticks)
+{
+	swdptap_turnaround(0);
+	swdptap_seq_out_internal(MS, ticks);
+}
+
+void swdptap_seq_out_parity(uint32_t MS, int ticks)
+{
+	swdptap_seq_out(MS, ticks);
+
+	uint32_t bitmask = (ticks == 32 ? 0 : (1 << ticks)) - 1;
+	uint32_t parity = swdptap_parity(MS & bitmask);
+	swdptap_seq_out(parity, 1);
+	platform_buffer_flush();
+}
+
+#else
+
+static uint8_t swdptap_bit_in(void);
+static void swdptap_bit_out(uint8_t val);
+
+static void swdptap_init_internal(void)
+{
+	if((err = ftdi_set_bitmode(ftdic, 0xAB, BITMODE_BITBANG)) != 0) {
+		fprintf(stderr, "ftdi_set_bitmode: %d: %s\n", 
+			err, ftdi_get_error_string(ftdic));
+		abort();
+	}
+
+	assert(ftdi_write_data(ftdic, "\xAB\xA8", 2) == 2);
 }
 
 static void swdptap_turnaround(uint8_t dir)
@@ -173,4 +358,4 @@ void swdptap_seq_out_parity(uint32_t MS, int ticks)
 	}
 	swdptap_bit_out(parity & 1);
 }
-
+#endif
